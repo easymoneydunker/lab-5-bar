@@ -1,8 +1,8 @@
 # Практическое занятие 6. Исследование виртуальной памяти ОС Windows
 
-Приложение на C# + Windows Forms (.NET 8), которое с помощью функций WinAPI
-`GetSystemInfo`, `GlobalMemoryStatus`, `VirtualQuery`, `VirtualAlloc` и `VirtualFree`
-показывает, как Windows организует виртуальную память процесса.
+Приложение на C# + Windows Forms (.NET 8), которое показывает, как Windows
+организует виртуальную память процесса: системная информация, состояние памяти,
+карта адресного пространства, резервирование и освобождение регионов.
 
 ## Как запустить
 
@@ -15,29 +15,49 @@ dotnet run
 
 Или открыть `Lab6/Lab6.csproj` в Visual Studio и нажать F5.
 
+## Почему без WinAPI совсем нельзя
+
+Задание требует функции `GetSystemInfo`, `GlobalMemoryStatus`, `VirtualQuery`,
+`VirtualAlloc`, `VirtualFree`. Это функции Windows из `kernel32.dll`, у большинства
+из них **нет аналогов в .NET**: например, .NET не умеет показать гранулярность
+выделения памяти, границы адресного пространства или пройтись по регионам памяти.
+
+Поэтому весь низкоуровневый код собран в **одном маленьком файле** `Native.cs`,
+а снаружи с ним работают через обычные C#-классы: `record`, `enum`, `IEnumerable`,
+`IDisposable`, LINQ. Форма вообще не знает про указатели и структуры WinAPI.
+Там, где у функций Windows есть .NET-аналоги (`Environment`, `Process`, `GC`),
+программа показывает их значения рядом, чтобы можно было сравнить.
+
 ## Структура проекта
 
 | Файл | Что внутри |
 |------|-----------|
-| `Lab6/Lab6.csproj` | Файл проекта: WinExe, `net8.0-windows`, `UseWindowsForms=true` |
-| `Lab6/Program.cs` | Точка входа: запускает форму `Form1` |
-| `Lab6/NativeMethods.cs` | Описание структур и функций WinAPI из `kernel32.dll` для вызова из C# |
-| `Lab6/Form1.cs` | Форма: кнопки, поле вывода (аналог `Memo1` из Delphi) и обработчики заданий |
+| `Lab6/Lab6.csproj` | Файл проекта: WinExe, `net8.0-windows`, Windows Forms |
+| `Lab6/Program.cs` | Точка входа, запускает `Form1` |
+| `Lab6/Native.cs` | Единственное место с WinAPI: структуры и объявления функций `kernel32.dll` |
+| `Lab6/Models.cs` | C#-модели: `enum` состояний/типов/защиты, `record` для результатов, форматирование |
+| `Lab6/VirtualMemory.cs` | Статический класс-обёртка: превращает вызовы WinAPI в C#-объекты |
+| `Lab6/VirtualRegion.cs` | Класс-обёртка над регионом памяти с `IDisposable` |
+| `Lab6/Form1.cs` | Форма: вкладки, таблицы, кнопки |
+
+Слои зависят друг от друга только сверху вниз:
+
+```
+Form1  →  VirtualMemory / VirtualRegion  →  Native (kernel32.dll)
+              ↓
+           Models (SystemInfo, MemoryStatus, MemoryRegion, enum'ы)
+```
 
 ## Интерфейс
 
-Сверху — панель кнопок, ниже — большое текстовое поле (аналог `TMemo`), куда пишутся результаты.
+Окно состоит из четырёх вкладок. Всё заполняется автоматически при запуске.
 
-| Кнопка | Задание |
-|--------|---------|
-| **1. GetSystemInfo** | 6.2.1 — системная информация |
-| **2. GlobalMemoryStatus** | 6.2.2 — текущее состояние памяти |
-| **Адрес (hex)** + **3. VirtualQuery** | 6.2.3 — информация о регионе по одному адресу |
-| **3. Карта памяти** | 6.2.3 — обход всего адресного пространства процесса через `VirtualQuery` |
-| **VirtualAlloc / VirtualFree** | Демонстрация резервирования региона, передачи и возврата физической памяти |
-| **Очистить** | Очищает поле вывода |
-
----
+| Вкладка | Задание | Что на ней |
+|---------|---------|-----------|
+| **1. GetSystemInfo** | 6.2.1 | Таблица «Параметр — Значение» с системной информацией + .NET-аналоги |
+| **2. GlobalMemoryStatus** | 6.2.2 | Таблица состояния памяти + данные процесса из .NET; галочка автообновления раз в секунду |
+| **3. VirtualQuery** | 6.2.3 | Слева — карта всех регионов адресного пространства (с фильтром по состоянию и колонкой «Модуль»), справа — подробности по одному адресу. Двойной клик по строке карты подставляет её адрес и вызывает `VirtualQuery` |
+| **VirtualAlloc / VirtualFree** | доп. | Пошаговая демонстрация: резервирование → передача памяти → запись/чтение → возврат → освобождение |
 
 # Теория
 
@@ -130,7 +150,7 @@ dotnet run
   исключений, номер последней ошибки (`GetLastError`), TLS-слоты. Регионы под
   TEB резервируются **при создании потока** и освобождаются при его завершении.
 
-На карте памяти (кнопка «3. Карта памяти») PEB и TEB видны как небольшие
+На карте памяти (вкладка «3. VirtualQuery») PEB и TEB видны как небольшие
 регионы `MEM_PRIVATE` / `MEM_COMMIT` / `PAGE_READWRITE`, начало которых не
 кратно 64 КБ.
 
@@ -225,9 +245,10 @@ BOOL VirtualFree(
 | `dwTotalVirtual` / `dwAvailVirtual` | Размер пользовательской части виртуального пространства процесса / сколько из неё свободно |
 
 Чтобы **отслеживать** состояние памяти, функцию вызывают повторно (например, по
-таймеру или по кнопке) и сравнивают значения: видно, как растёт загрузка, как
-уменьшается свободное ОЗУ и т. д. Например, нажмите «2. GlobalMemoryStatus»,
-потом «VirtualAlloc / VirtualFree», потом снова «2» — значения изменятся.
+таймеру) и сравнивают значения: видно, как растёт загрузка, как уменьшается
+свободное ОЗУ и т. д. В программе для этого на вкладке «2. GlobalMemoryStatus»
+есть галочка «Обновлять каждую секунду» — она включает `Timer`, который раз в
+секунду заново вызывает функцию.
 
 ## 9. VirtualQuery
 
@@ -264,194 +285,359 @@ SIZE_T VirtualQuery(
 
 # Разбор кода
 
-## NativeMethods.cs — подключение WinAPI
+## Native.cs — единственное место с WinAPI
 
-C# не умеет вызывать функции Windows напрямую, поэтому их описывают через
-**P/Invoke**: атрибут `[DllImport("kernel32.dll")]` говорит среде .NET, что тело
-функции находится в системной библиотеке `kernel32.dll`.
+C# не может вызвать функцию Windows напрямую, поэтому её нужно **объявить**
+через P/Invoke: атрибут `[DllImport("kernel32.dll")]` говорит .NET, что тело
+функции находится в системной библиотеке.
 
 ```csharp
 [DllImport("kernel32.dll")]
-public static extern void GetSystemInfo(out SYSTEM_INFO lpSystemInfo);
+public static extern nuint VirtualQuery(nint address, out MEMORY_BASIC_INFORMATION info, nuint length);
 ```
 
-Структуры `SYSTEM_INFO`, `MEMORYSTATUS`, `MEMORY_BASIC_INFORMATION` описаны
-с атрибутом `[StructLayout(LayoutKind.Sequential)]` — поля лежат в памяти
-в том же порядке, что и в C-структуре, поэтому Windows может их заполнить.
-
-Типы подобраны так, чтобы программа правильно работала и в 32-, и в 64-битном режиме:
+Структуры `SYSTEM_INFO`, `MEMORYSTATUS`, `MEMORY_BASIC_INFORMATION` повторяют
+C-структуры поле в поле; атрибут `[StructLayout(LayoutKind.Sequential)]`
+гарантирует, что поля лежат в памяти в том же порядке, и Windows может их заполнить.
 
 | C-тип | C#-тип | Почему |
 |-------|--------|--------|
 | `WORD` | `ushort` | 16 бит |
 | `DWORD` | `uint` | 32 бита |
-| `LPVOID`, `PVOID` | `IntPtr` | Указатель: 4 байта в x86, 8 байт в x64 |
-| `SIZE_T`, `DWORD_PTR` | `UIntPtr` | Беззнаковое число размера указателя |
+| `LPVOID`, `PVOID` | `nint` | Указатель: 4 байта в 32-битном процессе, 8 — в 64-битном |
+| `SIZE_T`, `DWORD_PTR` | `nuint` | Беззнаковое число размера указателя |
 
-В современных заголовках Windows поля размеров в `MEMORYSTATUS` и
-`RegionSize` имеют тип `SIZE_T`, а не `DWORD`, как в методичке (там описана
-32-битная Windows 98). Если описать их как `uint`, в 64-битной программе
-структура «съедет» и значения будут неверными.
+`nint`/`nuint` — встроенные типы C# для чисел «размером с указатель». В методичке
+поля размеров описаны как `DWORD`, потому что там 32-битная Windows 98; в современных
+заголовках Windows это `SIZE_T`. Если описать их как `uint`, в 64-битной программе
+структура «съедет» и значения будут мусором.
 
-Константы `MEM_*` и `PAGE_*` — это числовые значения из `winnt.h`.
+Интересный момент: в `MEMORY_BASIC_INFORMATION` поля `State`, `Protect`, `Type`
+объявлены сразу нашими `enum`'ами (`MemoryState`, `PageProtection`, `MemoryType`).
+`enum` с базовым типом `uint` хранится в памяти как обычный `uint`, поэтому
+Windows пишет туда число, а мы сразу получаем удобное значение перечисления.
 
-`out` — Windows сама заполняет переменную (аналог передачи по ссылке `var` в Delphi).
-`ref` — переменная передаётся по ссылке, но должна быть заполнена до вызова
-(нужно для `MEMORYSTATUS`, т. к. перед вызовом записываем `dwLength`).
+Класс помечен `internal` — его видно только внутри проекта, наружу он не «торчит».
 
-## Form1.cs — форма
+## Models.cs — C#-модели
 
-### Строковые константы
-
-В начале класса объявлены те же строки форматирования, что и в разделе `const`
-методички, только в синтаксисе C#:
-
-| Delphi | C# |
-|--------|----|
-| `'Page Size $%.8x bytes'` | `"Page Size ${0:X8} bytes"` |
-| `'Number of Processor %d'` | `"Number of Processors {0}"` |
-| `'Memory in use %d%%'` | `"Memory in use {0}%"` |
-| `Format(S, [x])` | `string.Format(S, x)` |
-
-`{0:X8}` — вывести первый аргумент в шестнадцатеричном виде, минимум 8 цифр
-(как `%.8x`). Символ `$` — просто текст, в Delphi так обозначают hex-числа.
-
-### Конструктор Form1
-
-Форма собирается кодом (без дизайнера), чтобы всё было в одном файле:
-
-* `memo` — многострочный `TextBox` только для чтения, растянут на всю форму
-  (`Dock = DockStyle.Fill`). Это аналог `Memo1`.
-* `panel` — `FlowLayoutPanel` сверху (`Dock = DockStyle.Top`), в нём кнопки
-  в ряд и поле ввода адреса `addressBox`.
-* `AddButton` создаёт кнопку и подписывает на её `Click` нужный обработчик.
-* Порядок `Controls.Add(memo); Controls.Add(panel);` важен: в WinForms
-  последний добавленный элемент докуется первым, поэтому панель занимает верх,
-  а `memo` — всё остальное.
-
-Вспомогательные методы:
-
-* `Add(line)` — дописывает строку в `memo` (аналог `Memo1.Lines.Add`).
-* `Hex(IntPtr)` — адрес в hex, 8 цифр для 32-бит и 16 цифр для 64-бит
-  (`IntPtr.Size * 2`).
-* `U(UIntPtr)` — переводит `UIntPtr` в `ulong`, чтобы его можно было форматировать.
-* `Mb(bytes)` — перевод байт в мегабайты для наглядности.
-
-### Задание 6.2.1 — `F1Click` (GetSystemInfo)
+### Перечисления
 
 ```csharp
-NativeMethods.GetSystemInfo(out SYSTEM_INFO si);
+public enum MemoryState : uint { Commit = 0x1000, Reserve = 0x2000, Free = 0x10000 }
+public enum MemoryType : uint { None = 0, Private = 0x20000, Mapped = 0x40000, Image = 0x1000000 }
+
+[Flags]
+public enum PageProtection : uint { NoAccess = 0x01, ReadOnly = 0x02, ReadWrite = 0x04, ..., Guard = 0x100 }
 ```
 
-1. Вызываем `GetSystemInfo` — Windows заполняет структуру `si`.
-2. Выводим по очереди архитектуру процессора, размер страницы, минимальный
-   и максимальный адрес приложения, маску процессоров, их количество,
-   тип процессора и гранулярность.
-3. `ArchitectureName` переводит числовой код архитектуры в название
-   (в методичке всегда выводилось `Intel`, здесь — реальное значение).
-4. `switch (si.wProcessorLevel)` — точная копия `case` из методички:
-   3 → 80386, 4 → 80486, 5 → Pentium, 6 → Pentium Pro, иначе — просто число.
-   На современных Intel/AMD обычно будет 6 (семейство 6) или другое число семейства.
-5. Выводим ревизию процессора `{0:X4}` (как `%.4x`).
-6. Минимальный адрес приложения записывается в поле «Адрес» — его удобно
-   сразу использовать в задании 6.2.3 (как требует примечание к заданию).
+Вместо констант `MEM_COMMIT`, `PAGE_READWRITE` и т. д. — типизированные `enum`.
+Значения совпадают с числами из `winnt.h`. Плюсы:
 
-**Что увидим (x64):** размер страницы `$00001000` (4096), гранулярность
-`$00010000` (65536), минимальный адрес `$0000000000010000`, максимальный
-`$00007FFFFFFEFFFF`.
+* нельзя случайно передать состояние вместо защиты — компилятор не даст;
+* `ToString()` сразу печатает имя: `Commit`, `ReadWrite`, `Image`;
+* `[Flags]` у `PageProtection` значит, что значения можно комбинировать битами,
+  и `ToString()` выведет их через запятую: `ReadWrite, Guard` — это страница стека
+  с флагом `PAGE_GUARD`.
 
-### Задание 6.2.2 — `F2Click` (GlobalMemoryStatus)
+Соответствие имён: `Commit` = `MEM_COMMIT`, `Reserve` = `MEM_RESERVE`,
+`Free` = `MEM_FREE`, `Image` = `MEM_IMAGE`, `ReadWrite` = `PAGE_READWRITE` и т. д.
+
+### Записи (record)
 
 ```csharp
-var ms = new MEMORYSTATUS();
-ms.dwLength = (uint)Marshal.SizeOf(ms);
-NativeMethods.GlobalMemoryStatus(ref ms);
+public record SystemInfo(string Architecture, uint PageSize, ulong MinAddress, ...);
+public record MemoryStatus(uint MemoryLoad, ulong TotalPhys, ulong AvailPhys, ...);
+public record MemoryRegion(ulong BaseAddress, ulong AllocationBase, ..., MemoryState State, ...);
 ```
 
-1. Создаём пустую структуру.
-2. `Marshal.SizeOf(ms)` — размер структуры в байтах (аналог `SizeOf(ms)`
-   в Delphi), записываем его в `dwLength`, как требует документация.
-3. Вызываем `GlobalMemoryStatus`, передавая структуру по ссылке.
-4. Выводим загрузку памяти в процентах и шесть объёмов (ОЗУ, файл подкачки,
-   виртуальная память — всего и свободно) в hex, как в методичке, и в МБ.
+`record` — неизменяемый класс «для данных»: одной строкой объявляются свойства и
+конструктор. В них лежат уже **понятные** значения (обычные `ulong` вместо `nint`,
+строка вместо кода архитектуры), а не сырые структуры WinAPI.
 
-**Что увидим (x64):** `Total virtual memory` около 128 ТБ — это размер
-пользовательской части адресного пространства, а не объём ОЗУ.
+Дополнительные вычисляемые свойства:
 
-### Задание 6.2.3 — `F3Click` и `ShowRegion` (VirtualQuery по адресу)
+* `SystemInfo.ProcessorLevelName` — `switch`-выражение, перевод уровня процессора
+  в название (3 → 80386, 4 → 80486, 5 → Pentium, 6 → Pentium Pro), точно как `case` в методичке;
+* `MemoryRegion.EndAddress` — адрес сразу за регионом (`BaseAddress + Size`);
+* `MemoryRegion.IsFree` — регион свободен;
+* `MemoryRegion.ToString()` переопределён, чтобы регион красиво печатался одной строкой.
 
-1. Берём текст из поля «Адрес», убираем `$` или `0x`, разбираем как
-   шестнадцатеричное число (`NumberStyles.HexNumber`).
-2. Если ввели не число — показываем сообщение.
-3. `ShowRegion` вызывает `Query`, а тот — `VirtualQuery`, передавая размер
-   структуры `MEMORY_BASIC_INFORMATION`.
-4. Если `VirtualQuery` вернула 0 — адрес вне пользовательского пространства.
-5. Иначе выводим все поля структуры (таблица 2 методички). Числовые коды
-   переводятся в имена методами:
-   * `StateName` — `MEM_COMMIT` / `MEM_RESERVE` / `MEM_FREE`;
-   * `TypeName` — `MEM_IMAGE` / `MEM_MAPPED` / `MEM_PRIVATE`;
-   * `ProtectName` — младший байт → `PAGE_*`, плюс флаги `GUARD`, `NOCACHE`,
-     `WRITECOMBINE`.
-
-**Какие адреса попробовать** (по результатам 6.2.1 и 6.2.2):
-* минимальный адрес приложения (подставляется автоматически после кнопки 1);
-* максимальный адрес приложения;
-* адрес ниже минимального, например `0` — увидим `MEM_FREE` или ошибку;
-* адрес, полученный после кнопки «VirtualAlloc / VirtualFree» (подставляется автоматически);
-* любой `Base` из карты памяти.
-
-### Задание 6.2.3 — `MapClick` (карта всего адресного пространства)
+### Formatting — методы расширения
 
 ```csharp
-while (address < max)
+public static string Hex(this ulong value) => "0x" + value.ToString("X" + IntPtr.Size * 2);
+public static string Bytes(this ulong value) => value switch { >= 1UL << 40 => "... ТБ", ... };
+```
+
+Слово `this` перед параметром делает метод **методом расширения**: его можно
+вызывать как будто он есть у самого `ulong`: `address.Hex()`, `size.Bytes()`.
+
+* `Hex` — адрес в шестнадцатеричном виде, 8 цифр для 32-бит и 16 для 64-бит.
+* `Bytes` — человекочитаемый размер. `switch` с шаблонами `>=` выбирает единицу
+  измерения; `1UL << 30` — это 2³⁰ = 1 ГБ.
+
+## VirtualMemory.cs — обёртка над функциями Windows
+
+Статический класс, который делает из вызовов WinAPI обычные C#-методы.
+
+### GetSystemInfo()
+
+```csharp
+Native.GetSystemInfo(out var si);
+return new SystemInfo(ArchitectureName(si.wProcessorArchitecture), si.dwPageSize, ...);
+```
+
+Вызывает функцию Windows (она заполняет структуру `si` через `out`), а затем
+перекладывает поля в `record SystemInfo`. Код архитектуры (0, 9, 12…) переводится
+в строку `switch`-выражением `ArchitectureName`.
+
+### GetMemoryStatus()
+
+```csharp
+var ms = new Native.MEMORYSTATUS { dwLength = (uint)Marshal.SizeOf<Native.MEMORYSTATUS>() };
+Native.GlobalMemoryStatus(ref ms);
+```
+
+1. Создаём структуру и **сразу** записываем её размер в `dwLength` — этого требует
+   документация (аналог `ms.dwLength := SizeOf(ms)` в Delphi).
+   `Marshal.SizeOf<T>()` возвращает размер структуры в байтах.
+2. Передаём по `ref` — по ссылке, потому что поле `dwLength` должно быть уже заполнено.
+3. Перекладываем результат в `record MemoryStatus`.
+
+### Query(address)
+
+```csharp
+if (Native.VirtualQuery((nint)address, out var mbi, size) == 0)
+    return null;
+return new MemoryRegion(...);
+```
+
+Вызывает `VirtualQuery`. Если функция вернула 0 (адрес вне пользовательского
+пространства) — возвращаем `null`; поэтому тип результата `MemoryRegion?`
+(знак `?` означает «может быть null»).
+
+### GetRegions() — обход адресного пространства
+
+```csharp
+public static IEnumerable<MemoryRegion> GetRegions()
 {
-    Query(new IntPtr(address), out MEMORY_BASIC_INFORMATION mbi);
-    ...
-    address = mbi.BaseAddress.ToInt64() + size;
+    var info = GetSystemInfo();
+    var address = info.MinAddress;
+
+    while (address < info.MaxAddress && Query(address) is { } region)
+    {
+        yield return region;
+        address = region.EndAddress;
+    }
 }
 ```
 
-1. Через `GetSystemInfo` берём минимальный и максимальный адрес приложения.
-2. В цикле вызываем `VirtualQuery` для текущего адреса и получаем один блок
-   одинаковых страниц.
-3. Выводим строку таблицы: `Base`, `AllocBase`, размер в КБ, состояние, защита, тип.
-   Для свободных блоков (`MEM_FREE`) выводятся только адрес и размер — остальные
-   поля для них не определены.
-4. Считаем суммарный объём свободной, зарезервированной и переданной памяти.
-5. Переходим к следующему блоку: `BaseAddress + RegionSize`.
-6. Текст собирается в `StringBuilder` и выводится одним вызовом — так
-   намного быстрее, чем добавлять тысячи строк по одной.
+Это и есть алгоритм построения карты памяти из теории:
+
+1. Берём минимальный и максимальный адрес приложения (`GetSystemInfo`).
+2. Спрашиваем `VirtualQuery` про текущий адрес — получаем блок одинаковых страниц.
+3. Переходим к следующему блоку: `BaseAddress + RegionSize`.
+4. Повторяем, пока не дойдём до максимального адреса.
+
+C#-особенности:
+
+* `yield return` — метод-**итератор**: регионы отдаются по одному «лениво», по мере
+  перебора `foreach` или LINQ, без ручного создания списка.
+* `Query(address) is { } region` — сопоставление с шаблоном: «если результат не `null`,
+  положи его в переменную `region`». Если `VirtualQuery` вернёт 0, цикл закончится.
+
+## VirtualRegion.cs — регион памяти как C#-объект
+
+Класс оборачивает пару `VirtualAlloc` / `VirtualFree` и реализует `IDisposable`,
+поэтому с регионом можно работать через `using`, как с файлом:
+
+```csharp
+using (var region = VirtualRegion.Reserve(64 * 1024))
+{
+    region.Commit(4096);
+    region.WriteInt32(12345);
+    region.Decommit(4096);
+}
+```
+
+| Метод | Что вызывает |
+|-------|--------------|
+| `Reserve(size)` | `VirtualAlloc(NULL, size, MEM_RESERVE, PAGE_NOACCESS)` — резервирует регион |
+| `Commit(size, protection)` | `VirtualAlloc(Address, size, MEM_COMMIT, protection)` — передаёт физическую память |
+| `Decommit(size)` | `VirtualFree(Address, size, MEM_DECOMMIT)` — возвращает физическую память |
+| `Dispose()` | `VirtualFree(Address, 0, MEM_RELEASE)` — освобождает регион целиком |
+| `WriteInt32` / `ReadInt32` | `Marshal.WriteInt32` / `ReadInt32` — запись/чтение числа по адресу региона |
+| `Info` | `VirtualMemory.Query(Address)` — текущее состояние региона |
+
+* Конструктор `private` — создать объект можно только через `Reserve`, то есть
+  только для реально зарезервированного региона (паттерн «фабричный метод»).
+* Если Windows вернула ошибку, бросается `Win32Exception` — он сам берёт код
+  ошибки через `GetLastError` (для этого в `DllImport` указано `SetLastError = true`).
+* `Dispose` вызывается автоматически в конце блока `using` — даже если внутри
+  произошло исключение. Поэтому регион невозможно «забыть» освободить.
+  Флаг `released` защищает от двойного освобождения.
+
+## Form1.cs — форма
+
+Форма собрана кодом, без дизайнера, чтобы всё было в одном файле.
+
+### Поля и конструктор
+
+Элементы управления объявлены полями с инициализаторами
+(`readonly ListView systemList = CreatePairList(320, 420);`), так весь внешний вид
+виден сразу. `new() { ... }` — сокращённое создание объекта, тип берётся из объявления поля.
+
+В конструкторе:
+
+1. Создаётся `TabControl` с четырьмя вкладками (`CreateSystemTab()`, …).
+2. Подписываются события лямбдами: `timer.Tick += (_, _) => ShowMemoryStatus();`.
+   `(_, _)` — параметры события (`sender`, `e`), которые нам не нужны.
+3. На событие `Load` (форма показана) заполняются все вкладки.
+
+### Вспомогательные методы внизу класса
+
+* `CreateTab(title, content, params Control[] toolbar)` — создаёт вкладку:
+  сверху панель с кнопками (`FlowLayoutPanel`), остальное — содержимое.
+  `params` позволяет передать любое количество кнопок через запятую.
+  Порядок `Controls.Add(content); Controls.Add(panel);` важен: в WinForms
+  последний добавленный элемент докуется первым, поэтому панель встаёт наверх,
+  а содержимое занимает остаток.
+* `CreateButton(text, Action action)` — кнопка, которая при нажатии вызывает
+  переданный метод. Поэтому можно писать `CreateButton("Обновить", ShowSystemInfo)`.
+* `CreatePairList` — `ListView` в режиме таблицы с колонками «Параметр» и «Значение».
+* `Fill(list, params (string Name, string Value)[] rows)` — заполняет такую таблицу.
+  Строки передаются **кортежами** `("Название", "значение")`; в цикле кортеж
+  сразу раскладывается на две переменные: `foreach (var (name, value) in rows)`.
+  `BeginUpdate`/`EndUpdate` — чтобы таблица не перерисовывалась на каждой строке.
+* `Describe(bytes)` — размер в виде «15,9 ГБ (17 037 299 712 байт)».
+
+### Задание 6.2.1 — вкладка «1. GetSystemInfo», метод `ShowSystemInfo`
+
+1. `VirtualMemory.GetSystemInfo()` возвращает `record SystemInfo`.
+2. `Fill(systemList, ...)` выводит все поля: архитектура, размер страницы,
+   минимальный и максимальный адреса, маска процессоров, их количество, тип,
+   гранулярность, уровень (`ProcessorLevelName`) и ревизия процессора.
+   Строки собраны **интерполяцией**: `$"{si.PageSize:N0} байт (0x{si.PageSize:X8})"`
+   (`:N0` — число с разделителями тысяч, `:X8` — hex из 8 цифр, как `%.8x` в Delphi).
+3. Ниже для сравнения — те же сведения из .NET:
+   `Environment.SystemPageSize`, `Environment.ProcessorCount`,
+   `RuntimeInformation.OSArchitecture`, `Environment.Is64BitProcess`.
+   Аналогов для гранулярности и границ адресов в .NET нет.
+4. Минимальный адрес приложения подставляется в поле «Адрес» на вкладке 3 —
+   как требует примечание к заданию 6.2.3.
+
+**Что увидим (x64):** страница 4 096 байт, гранулярность 65 536 байт (64 КБ),
+минимальный адрес `0x0000000000010000`, максимальный `0x00007FFFFFFEFFFF`.
+
+### Задание 6.2.2 — вкладка «2. GlobalMemoryStatus», метод `ShowMemoryStatus`
+
+1. `VirtualMemory.GetMemoryStatus()` возвращает `record MemoryStatus`.
+2. Выводятся загрузка памяти в процентах и шесть объёмов: ОЗУ, файл подкачки,
+   виртуальная память (всего и свободно).
+3. Ниже — данные о **нашем процессе** из .NET: `Process.WorkingSet64` (сколько
+   физической памяти занимает процесс), `PrivateMemorySize64` (личная переданная
+   память), `VirtualMemorySize64` (сколько адресного пространства занято),
+   `GC.GetTotalMemory` (сколько занимают .NET-объекты).
+   `using var process = ...` — объект `Process` освободится в конце метода.
+4. Галочка «Обновлять каждую секунду» включает `Timer`, который раз в секунду
+   снова вызывает `ShowMemoryStatus` — это и есть **отслеживание** состояния памяти.
+   Строка «Время замера» показывает, что данные обновляются.
+
+**Что увидим (x64):** «Всего виртуальной памяти процесса» ≈ 128 ТБ — это размер
+пользовательской части адресного пространства, а не объём ОЗУ.
+
+### Задание 6.2.3 — вкладка «3. VirtualQuery»
+
+#### Карта памяти: `BuildMap` и `ShowMap`
+
+```csharp
+modules = process.Modules.Cast<ProcessModule>()
+    .Select(m => ((ulong)m.BaseAddress, (ulong)m.BaseAddress + (ulong)m.ModuleMemorySize, m.ModuleName))
+    .ToList();
+
+regions = VirtualMemory.GetRegions().ToList();
+```
+
+1. Через .NET (`Process.Modules`) берём список загруженных EXE/DLL с их адресами —
+   чтобы подписать, какому модулю принадлежит регион.
+2. `GetRegions().ToList()` — обходим всё адресное пространство через `VirtualQuery`
+   и сохраняем регионы в список.
+3. `ShowMap` фильтрует список по выбранному состоянию и показывает его в `DataGridView`:
+
+```csharp
+var filtered = stateFilter.SelectedItem is MemoryState state
+    ? regions.Where(r => r.State == state)
+    : regions;
+
+mapGrid.DataSource = filtered.Select(r => new { Адрес = ..., Регион = ..., Размер = ..., ... }).ToList();
+```
+
+* В выпадающем списке лежат строка «Все» и значения `enum MemoryState`.
+  `is MemoryState state` — если выбрано значение перечисления, фильтруем `Where`,
+  иначе («Все») показываем всё.
+* `Select(r => new { ... })` создаёт **анонимный тип** с нужными колонками.
+  `DataGridView` через `DataSource` сам строит колонки по именам свойств —
+  поэтому они названы по-русски.
+* Для свободных регионов защита, тип и `AllocationBase` не выводятся — по
+  документации для `MEM_FREE` они не определены.
+* `ModuleOf(r)` — для регионов типа `Image` ищет LINQ-ом (`FirstOrDefault`) модуль,
+  в диапазон которого попадает `AllocationBase`.
+* Итоговая строка считается через `GroupBy` по состоянию: сколько регионов и
+  какой суммарный объём (`Aggregate` складывает размеры) у `Commit`, `Reserve`, `Free`.
+
+#### Один адрес: `QueryAddress`
+
+1. Текст из поля «Адрес» очищается от `0x`/`$` и разбирается как hex
+   (`NumberStyles.HexNumber`). Если ввели не число — сообщение.
+2. `VirtualMemory.Query(address) is not { } r` — если вернулся `null`,
+   пишем, что `VirtualQuery` вернула 0.
+3. Иначе выводим все поля `MEMORY_BASIC_INFORMATION` (таблица 2 методички)
+   и модуль, если регион принадлежит EXE/DLL.
+4. Двойной клик по строке карты (`MapGridDoubleClick`) берёт адрес из первой
+   ячейки строки и вызывает `QueryAddress`.
+
+**Какие адреса попробовать** (по результатам 6.2.1 и 6.2.2):
+* минимальный адрес приложения (подставляется автоматически);
+* максимальный адрес приложения;
+* `0` — нижняя недоступная область, `Free`;
+* адрес из вкладки «VirtualAlloc / VirtualFree» (подставляется после демонстрации);
+* любую строку карты двойным кликом.
 
 **Что видно на карте:**
-* `MEM_IMAGE` с `PAGE_EXECUTE_READ`/`PAGE_READONLY` — это EXE и DLL
-  (у нескольких подряд блоков одинаковый `AllocBase` — это секции одного модуля:
-  код, данные, ресурсы);
-* `MEM_PRIVATE` `MEM_RESERVE` + немного `MEM_COMMIT` с `PAGE_READWRITE|GUARD` — стеки потоков;
-* `MEM_MAPPED` — проецируемые файлы (например, таблицы национальных языков);
-* небольшие `MEM_PRIVATE` регионы, не выровненные на 64 КБ, — PEB и TEB;
-* у всех регионов, выделенных приложением, `AllocBase` кратен `0x10000` (64 КБ) —
-  это и есть гранулярность выделения.
+* `Image` с `ExecuteRead`/`ReadOnly` и именем в колонке «Модуль» — EXE и DLL;
+  несколько строк подряд с одинаковым «Регионом» — секции одного модуля (код, данные, ресурсы);
+* `Private`: большой `Reserve` + немного `Commit` с `ReadWrite, Guard` — стеки потоков;
+* `Mapped` — проецируемые в память файлы;
+* небольшие `Private` регионы, «Регион» которых не кратен `0x10000`, — PEB и TEB;
+* у регионов, выделенных приложением, «Регион» (`AllocationBase`) кратен
+  `0x10000` (64 КБ) — это гранулярность выделения.
 
-### Дополнительно — `AllocClick` (VirtualAlloc / VirtualFree)
+### Дополнительно — вкладка «VirtualAlloc / VirtualFree», метод `RunAllocDemo`
 
-Показывает жизненный цикл региона, описанный в теории:
+```csharp
+using (var region = VirtualRegion.Reserve(si.AllocationGranularity))
+{
+    region.Commit(si.PageSize);
+    region.WriteInt32(12345);
+    region.Decommit(si.PageSize);
+}
+```
 
-1. `VirtualAlloc(NULL, 64 КБ, MEM_RESERVE, PAGE_NOACCESS)` — резервируем регион.
-   `VirtualQuery` показывает `State = MEM_RESERVE`, `BaseAddress` кратен 64 КБ.
-2. `VirtualAlloc(p, 4 КБ, MEM_COMMIT, PAGE_READWRITE)` — передаём физическую
-   память первой странице. Теперь `State = MEM_COMMIT`, `RegionSize = 4 КБ`,
-   `Protect = PAGE_READWRITE`, а `AllocationProtect` остался `PAGE_NOACCESS` —
-   так видно разницу между этими двумя полями.
-3. `Marshal.WriteInt32` / `Marshal.ReadInt32` — записываем и читаем число,
-   доказывая, что память реально работает. (До шага 2 такая запись вызвала бы
-   нарушение доступа.)
-4. `VirtualFree(p, 4 КБ, MEM_DECOMMIT)` — возвращаем физическую память,
-   страница снова `MEM_RESERVE`.
-5. `VirtualFree(p, 0, MEM_RELEASE)` — освобождаем регион целиком,
-   `State = MEM_FREE`.
+После каждого шага печатается `region.Info` — результат `VirtualQuery`:
 
-Адрес региона подставляется в поле «Адрес», чтобы его можно было ещё раз
-проверить кнопкой «3. VirtualQuery».
+1. **Reserve** — регион 64 КБ зарезервирован: `Reserve`, адрес кратен 64 КБ.
+2. **Commit** — первой странице (4 КБ) передана физическая память: `Commit`,
+   `ReadWrite`, размер блока 4 КБ. При этом `AllocationProtect` остался `NoAccess` —
+   видно разницу между защитой при резервировании и текущей защитой.
+3. Записали число 12345 и прочитали его обратно — память реально работает.
+   До шага 2 такая запись вызвала бы нарушение доступа.
+4. **Decommit** — физическая память возвращена, страница снова `Reserve`.
+5. **Dispose** — выход из `using` автоматически вызвал `VirtualFree(..., MEM_RELEASE)`,
+   регион освобождён: `Free`.
+
+Адрес региона подставляется в поле «Адрес» на вкладке 3 — можно ещё раз
+убедиться через `VirtualQuery`, что он свободен.
 
 ---
 

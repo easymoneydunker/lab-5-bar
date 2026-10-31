@@ -1,335 +1,295 @@
-using System;
-using System.Drawing;
+using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
-using System.Text;
-using System.Windows.Forms;
 
-namespace Lab6
+namespace Lab6;
+
+public class Form1 : Form
 {
-    public class Form1 : Form
+    readonly ListView systemList = CreatePairList(320, 420);
+    readonly ListView memoryList = CreatePairList(320, 420);
+    readonly ListView regionList = CreatePairList(150, 260);
+    readonly ComboBox stateFilter = new() { DropDownStyle = ComboBoxStyle.DropDownList, Width = 110 };
+    readonly TextBox addressBox = new() { Width = 170 };
+    readonly Label mapSummary = new() { AutoSize = true, Margin = new Padding(10, 8, 0, 0) };
+    readonly CheckBox autoRefresh = new() { Text = "Обновлять каждую секунду", AutoSize = true, Margin = new Padding(10, 6, 0, 0) };
+    readonly System.Windows.Forms.Timer timer = new() { Interval = 1000 };
+
+    readonly DataGridView mapGrid = new()
     {
-        const string SProc = "Processor Architecture {0}";
-        const string SPageSize = "Page Size ${0:X8} bytes";
-        const string SMinAddr = "Minimum Application Address ${0}";
-        const string SMaxAddr = "Maximum Application Address ${0}";
-        const string SNumProcs = "Number of Processors {0}";
-        const string SAllocGra = "Allocation Granularity ${0:X8} bytes";
-        const string SProcLevel = "Processor Level {0}";
-        const string SIntel3 = "80386";
-        const string SIntel4 = "80486";
-        const string SIntel5 = "Pentium";
-        const string SIntel6 = "Pentium Pro";
-        const string SProcRev = "Processor Revision {0:X4}";
+        Dock = DockStyle.Fill,
+        ReadOnly = true,
+        AllowUserToAddRows = false,
+        RowHeadersVisible = false,
+        SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+        AutoSizeColumnsMode = DataGridViewAutoSizeColumnsMode.AllCells,
+        Font = new Font("Consolas", 9)
+    };
 
-        const string SMemUse = "Memory in use {0}%";
-        const string STotMem = "Total physical memory ${0:X8} bytes";
-        const string SFreeMem = "Free physical memory ${0:X8} bytes";
-        const string STotPage = "Total page file memory ${0:X8} bytes";
-        const string SFreePage = "Free page file memory ${0:X8} bytes";
-        const string STotVirt = "Total virtual memory ${0:X8} bytes";
-        const string SFreeVirt = "Free virtual memory ${0:X8} bytes";
+    readonly TextBox allocLog = new()
+    {
+        Dock = DockStyle.Fill,
+        Multiline = true,
+        ReadOnly = true,
+        ScrollBars = ScrollBars.Vertical,
+        Font = new Font("Consolas", 10)
+    };
 
-        TextBox memo;
-        TextBox addressBox;
+    List<MemoryRegion> regions = new();
+    List<(ulong Start, ulong End, string Name)> modules = new();
 
-        public Form1()
+    public Form1()
+    {
+        Text = "Практическое занятие 6. Виртуальная память Windows";
+        Size = new Size(1150, 720);
+
+        var tabs = new TabControl { Dock = DockStyle.Fill };
+        tabs.TabPages.Add(CreateSystemTab());
+        tabs.TabPages.Add(CreateMemoryTab());
+        tabs.TabPages.Add(CreateMapTab());
+        tabs.TabPages.Add(CreateAllocTab());
+        Controls.Add(tabs);
+
+        timer.Tick += (_, _) => ShowMemoryStatus();
+        autoRefresh.CheckedChanged += (_, _) => timer.Enabled = autoRefresh.Checked;
+        stateFilter.SelectedIndexChanged += (_, _) => ShowMap();
+        mapGrid.CellDoubleClick += MapGridDoubleClick;
+
+        Load += (_, _) =>
         {
-            Text = "Практическое занятие 6. Виртуальная память Windows";
-            Width = 1000;
-            Height = 700;
-
-            memo = new TextBox
-            {
-                Multiline = true,
-                ReadOnly = true,
-                WordWrap = false,
-                ScrollBars = ScrollBars.Both,
-                Dock = DockStyle.Fill,
-                Font = new Font("Consolas", 10)
-            };
-
-            var panel = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Top,
-                AutoSize = true,
-                Padding = new Padding(5)
-            };
-
-            AddButton(panel, "1. GetSystemInfo", F1Click);
-            AddButton(panel, "2. GlobalMemoryStatus", F2Click);
-
-            panel.Controls.Add(new Label { Text = "Адрес (hex):", AutoSize = true, Margin = new Padding(10, 9, 0, 0) });
-            addressBox = new TextBox { Width = 150, Text = "10000", Margin = new Padding(3, 6, 3, 3) };
-            panel.Controls.Add(addressBox);
-
-            AddButton(panel, "3. VirtualQuery", F3Click);
-            AddButton(panel, "3. Карта памяти", MapClick);
-            AddButton(panel, "VirtualAlloc / VirtualFree", AllocClick);
-            AddButton(panel, "Очистить", (s, e) => memo.Clear());
-
-            Controls.Add(memo);
-            Controls.Add(panel);
-        }
-
-        void AddButton(FlowLayoutPanel panel, string text, EventHandler handler)
-        {
-            var button = new Button { Text = text, AutoSize = true, Height = 30 };
-            button.Click += handler;
-            panel.Controls.Add(button);
-        }
-
-        void Add(string line)
-        {
-            memo.AppendText(line + Environment.NewLine);
-        }
-
-        static string Hex(IntPtr p)
-        {
-            return p.ToInt64().ToString("X" + IntPtr.Size * 2);
-        }
-
-        static ulong U(UIntPtr v)
-        {
-            return v.ToUInt64();
-        }
-
-        static string Mb(ulong bytes)
-        {
-            return (bytes / 1024.0 / 1024.0).ToString("N1") + " MB";
-        }
-
-        void F1Click(object sender, EventArgs e)
-        {
-            NativeMethods.GetSystemInfo(out SYSTEM_INFO si);
-
-            Add("===== GetSystemInfo =====");
-            Add(string.Format(SProc, ArchitectureName(si.wProcessorArchitecture)));
-            Add(string.Format(SPageSize, si.dwPageSize) + "  (" + si.dwPageSize + " bytes)");
-            Add(string.Format(SMinAddr, Hex(si.lpMinimumApplicationAddress)));
-            Add(string.Format(SMaxAddr, Hex(si.lpMaximumApplicationAddress)));
-            Add("Active Processor Mask $" + U(si.dwActiveProcessorMask).ToString("X"));
-            Add(string.Format(SNumProcs, si.dwNumberOfProcessors));
-            Add("Processor Type " + si.dwProcessorType);
-            Add(string.Format(SAllocGra, si.dwAllocationGranularity) + "  (" + si.dwAllocationGranularity / 1024 + " KB)");
-
-            switch (si.wProcessorLevel)
-            {
-                case 3: Add(string.Format(SProcLevel, SIntel3)); break;
-                case 4: Add(string.Format(SProcLevel, SIntel4)); break;
-                case 5: Add(string.Format(SProcLevel, SIntel5)); break;
-                case 6: Add(string.Format(SProcLevel, SIntel6)); break;
-                default: Add(string.Format(SProcLevel, si.wProcessorLevel)); break;
-            }
-
-            Add(string.Format(SProcRev, si.wProcessorRevision));
-            Add("");
-
-            addressBox.Text = Hex(si.lpMinimumApplicationAddress);
-        }
-
-        static string ArchitectureName(ushort arch)
-        {
-            switch (arch)
-            {
-                case 0: return "Intel (x86)";
-                case 5: return "ARM";
-                case 6: return "Intel Itanium (IA64)";
-                case 9: return "AMD64 (x64)";
-                case 12: return "ARM64";
-                default: return "Unknown (" + arch + ")";
-            }
-        }
-
-        void F2Click(object sender, EventArgs e)
-        {
-            var ms = new MEMORYSTATUS();
-            ms.dwLength = (uint)Marshal.SizeOf(ms);
-            NativeMethods.GlobalMemoryStatus(ref ms);
-
-            Add("===== GlobalMemoryStatus =====");
-            Add(string.Format(SMemUse, ms.dwMemoryLoad));
-            Add(string.Format(STotMem, U(ms.dwTotalPhys)) + "  (" + Mb(U(ms.dwTotalPhys)) + ")");
-            Add(string.Format(SFreeMem, U(ms.dwAvailPhys)) + "  (" + Mb(U(ms.dwAvailPhys)) + ")");
-            Add(string.Format(STotPage, U(ms.dwTotalPageFile)) + "  (" + Mb(U(ms.dwTotalPageFile)) + ")");
-            Add(string.Format(SFreePage, U(ms.dwAvailPageFile)) + "  (" + Mb(U(ms.dwAvailPageFile)) + ")");
-            Add(string.Format(STotVirt, U(ms.dwTotalVirtual)) + "  (" + Mb(U(ms.dwTotalVirtual)) + ")");
-            Add(string.Format(SFreeVirt, U(ms.dwAvailVirtual)) + "  (" + Mb(U(ms.dwAvailVirtual)) + ")");
-            Add("");
-        }
-
-        void F3Click(object sender, EventArgs e)
-        {
-            string text = addressBox.Text.Trim().TrimStart('$');
-            if (text.StartsWith("0x", StringComparison.OrdinalIgnoreCase))
-                text = text.Substring(2);
-
-            if (!long.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out long address))
-            {
-                MessageBox.Show("Введите адрес в шестнадцатеричном виде, например 7FFE0000");
-                return;
-            }
-
-            Add("===== VirtualQuery($" + address.ToString("X") + ") =====");
-            ShowRegion(new IntPtr(address));
-            Add("");
-        }
-
-        bool Query(IntPtr address, out MEMORY_BASIC_INFORMATION mbi)
-        {
-            var size = (UIntPtr)Marshal.SizeOf(typeof(MEMORY_BASIC_INFORMATION));
-            return NativeMethods.VirtualQuery(address, out mbi, size) != UIntPtr.Zero;
-        }
-
-        void ShowRegion(IntPtr address)
-        {
-            if (!Query(address, out MEMORY_BASIC_INFORMATION mbi))
-            {
-                Add("VirtualQuery вернула 0: адрес вне пользовательского адресного пространства");
-                return;
-            }
-
-            Add("BaseAddress       $" + Hex(mbi.BaseAddress));
-            Add("AllocationBase    $" + Hex(mbi.AllocationBase));
-            Add("AllocationProtect " + ProtectName(mbi.AllocationProtect));
-            Add("RegionSize        $" + U(mbi.RegionSize).ToString("X8") + "  (" + U(mbi.RegionSize) / 1024 + " KB)");
-            Add("State             " + StateName(mbi.State));
-            Add("Protect           " + ProtectName(mbi.Protect));
-            Add("Type              " + TypeName(mbi.Type));
-        }
-
-        void MapClick(object sender, EventArgs e)
-        {
-            NativeMethods.GetSystemInfo(out SYSTEM_INFO si);
-            long address = si.lpMinimumApplicationAddress.ToInt64();
-            long max = si.lpMaximumApplicationAddress.ToInt64();
-            int digits = IntPtr.Size * 2;
-
-            var sb = new StringBuilder();
-            sb.AppendLine("===== Карта виртуального адресного пространства =====");
-            sb.AppendLine(string.Format("{0,-" + (digits + 2) + "} {1,-" + (digits + 2) + "} {2,14}  {3,-12} {4,-26} {5}",
-                "Base", "AllocBase", "Size (KB)", "State", "Protect", "Type"));
-
-            int count = 0;
-            long free = 0, reserved = 0, committed = 0;
-
-            while (address < max)
-            {
-                if (!Query(new IntPtr(address), out MEMORY_BASIC_INFORMATION mbi))
-                    break;
-
-                long size = (long)U(mbi.RegionSize);
-                bool isFree = mbi.State == NativeMethods.MEM_FREE;
-
-                sb.AppendLine(string.Format("{0,-" + (digits + 2) + "} {1,-" + (digits + 2) + "} {2,14:N0}  {3,-12} {4,-26} {5}",
-                    "$" + Hex(mbi.BaseAddress),
-                    isFree ? "" : "$" + Hex(mbi.AllocationBase),
-                    size / 1024,
-                    StateName(mbi.State),
-                    isFree ? "" : ProtectName(mbi.Protect),
-                    isFree ? "" : TypeName(mbi.Type)));
-
-                if (mbi.State == NativeMethods.MEM_FREE) free += size;
-                if (mbi.State == NativeMethods.MEM_RESERVE) reserved += size;
-                if (mbi.State == NativeMethods.MEM_COMMIT) committed += size;
-
-                count++;
-                address = mbi.BaseAddress.ToInt64() + size;
-            }
-
-            sb.AppendLine();
-            sb.AppendLine("Регионов: " + count);
-            sb.AppendLine("MEM_FREE:    " + Mb((ulong)free));
-            sb.AppendLine("MEM_RESERVE: " + Mb((ulong)reserved));
-            sb.AppendLine("MEM_COMMIT:  " + Mb((ulong)committed));
-            sb.AppendLine();
-
-            memo.AppendText(sb.ToString());
-        }
-
-        void AllocClick(object sender, EventArgs e)
-        {
-            NativeMethods.GetSystemInfo(out SYSTEM_INFO si);
-            var regionSize = (UIntPtr)si.dwAllocationGranularity;
-            var pageSize = (UIntPtr)si.dwPageSize;
-
-            Add("===== VirtualAlloc / VirtualFree =====");
-
-            IntPtr p = NativeMethods.VirtualAlloc(IntPtr.Zero, regionSize, NativeMethods.MEM_RESERVE, NativeMethods.PAGE_NOACCESS);
-            if (p == IntPtr.Zero)
-            {
-                Add("Ошибка VirtualAlloc(MEM_RESERVE): " + Marshal.GetLastWin32Error());
-                return;
-            }
-
-            Add("--- 1) Регион зарезервирован: VirtualAlloc(NULL, " + U(regionSize) + ", MEM_RESERVE, PAGE_NOACCESS)");
-            ShowRegion(p);
-
-            NativeMethods.VirtualAlloc(p, pageSize, NativeMethods.MEM_COMMIT, NativeMethods.PAGE_READWRITE);
-            Add("--- 2) Первой странице передана физическая память: VirtualAlloc(p, " + U(pageSize) + ", MEM_COMMIT, PAGE_READWRITE)");
-            ShowRegion(p);
-
-            Marshal.WriteInt32(p, 12345);
-            Add("--- 3) Записали в память число 12345, прочитали: " + Marshal.ReadInt32(p));
-
-            NativeMethods.VirtualFree(p, pageSize, NativeMethods.MEM_DECOMMIT);
-            Add("--- 4) Физическая память возвращена: VirtualFree(p, " + U(pageSize) + ", MEM_DECOMMIT)");
-            ShowRegion(p);
-
-            NativeMethods.VirtualFree(p, UIntPtr.Zero, NativeMethods.MEM_RELEASE);
-            Add("--- 5) Регион освобождён: VirtualFree(p, 0, MEM_RELEASE)");
-            ShowRegion(p);
-            Add("");
-
-            addressBox.Text = Hex(p);
-        }
-
-        static string StateName(uint state)
-        {
-            switch (state)
-            {
-                case NativeMethods.MEM_COMMIT: return "MEM_COMMIT";
-                case NativeMethods.MEM_RESERVE: return "MEM_RESERVE";
-                case NativeMethods.MEM_FREE: return "MEM_FREE";
-                default: return "$" + state.ToString("X");
-            }
-        }
-
-        static string TypeName(uint type)
-        {
-            switch (type)
-            {
-                case NativeMethods.MEM_IMAGE: return "MEM_IMAGE";
-                case NativeMethods.MEM_MAPPED: return "MEM_MAPPED";
-                case NativeMethods.MEM_PRIVATE: return "MEM_PRIVATE";
-                case 0: return "-";
-                default: return "$" + type.ToString("X");
-            }
-        }
-
-        static string ProtectName(uint protect)
-        {
-            if (protect == 0)
-                return "-";
-
-            string name;
-            switch (protect & 0xFF)
-            {
-                case NativeMethods.PAGE_NOACCESS: name = "PAGE_NOACCESS"; break;
-                case NativeMethods.PAGE_READONLY: name = "PAGE_READONLY"; break;
-                case NativeMethods.PAGE_READWRITE: name = "PAGE_READWRITE"; break;
-                case NativeMethods.PAGE_WRITECOPY: name = "PAGE_WRITECOPY"; break;
-                case NativeMethods.PAGE_EXECUTE: name = "PAGE_EXECUTE"; break;
-                case NativeMethods.PAGE_EXECUTE_READ: name = "PAGE_EXECUTE_READ"; break;
-                case NativeMethods.PAGE_EXECUTE_READWRITE: name = "PAGE_EXECUTE_READWRITE"; break;
-                case NativeMethods.PAGE_EXECUTE_WRITECOPY: name = "PAGE_EXECUTE_WRITECOPY"; break;
-                default: name = "$" + (protect & 0xFF).ToString("X"); break;
-            }
-
-            if ((protect & NativeMethods.PAGE_GUARD) != 0) name += "|GUARD";
-            if ((protect & NativeMethods.PAGE_NOCACHE) != 0) name += "|NOCACHE";
-            if ((protect & NativeMethods.PAGE_WRITECOMBINE) != 0) name += "|WRITECOMBINE";
-            return name;
-        }
+            ShowSystemInfo();
+            ShowMemoryStatus();
+            BuildMap();
+        };
     }
+
+    TabPage CreateSystemTab() =>
+        CreateTab("1. GetSystemInfo", systemList,
+            CreateButton("Обновить", ShowSystemInfo));
+
+    TabPage CreateMemoryTab() =>
+        CreateTab("2. GlobalMemoryStatus", memoryList,
+            CreateButton("Обновить", ShowMemoryStatus),
+            autoRefresh);
+
+    TabPage CreateMapTab()
+    {
+        stateFilter.Items.Add("Все");
+        stateFilter.Items.AddRange(Enum.GetValues<MemoryState>().Cast<object>().ToArray());
+        stateFilter.SelectedIndex = 0;
+
+        regionList.Dock = DockStyle.Right;
+        regionList.Width = 420;
+
+        var content = new Panel { Dock = DockStyle.Fill };
+        content.Controls.Add(mapGrid);
+        content.Controls.Add(regionList);
+
+        return CreateTab("3. VirtualQuery", content,
+            CreateButton("Построить карту", BuildMap),
+            CreateLabel("Состояние:"), stateFilter,
+            CreateLabel("Адрес:"), addressBox,
+            CreateButton("VirtualQuery", QueryAddress),
+            mapSummary);
+    }
+
+    TabPage CreateAllocTab() =>
+        CreateTab("VirtualAlloc / VirtualFree", allocLog,
+            CreateButton("Выполнить", RunAllocDemo));
+
+    void ShowSystemInfo()
+    {
+        var si = VirtualMemory.GetSystemInfo();
+
+        Fill(systemList,
+            ("Архитектура процессора", si.Architecture),
+            ("Размер страницы", $"{si.PageSize:N0} байт (0x{si.PageSize:X8})"),
+            ("Минимальный адрес приложения", si.MinAddress.Hex()),
+            ("Максимальный адрес приложения", si.MaxAddress.Hex()),
+            ("Маска активных процессоров", $"0x{si.ActiveProcessorMask:X}"),
+            ("Количество процессоров", si.ProcessorCount.ToString()),
+            ("Тип процессора", si.ProcessorType.ToString()),
+            ("Гранулярность выделения памяти", $"{si.AllocationGranularity:N0} байт (0x{si.AllocationGranularity:X8})"),
+            ("Уровень процессора", si.ProcessorLevelName),
+            ("Ревизия процессора", $"{si.ProcessorRevision:X4}"),
+            ("", ""),
+            (".NET: Environment.SystemPageSize", $"{Environment.SystemPageSize:N0} байт"),
+            (".NET: Environment.ProcessorCount", Environment.ProcessorCount.ToString()),
+            (".NET: RuntimeInformation.OSArchitecture", RuntimeInformation.OSArchitecture.ToString()),
+            (".NET: Environment.Is64BitProcess", Environment.Is64BitProcess ? "Да" : "Нет"));
+
+        addressBox.Text = si.MinAddress.Hex();
+    }
+
+    void ShowMemoryStatus()
+    {
+        var ms = VirtualMemory.GetMemoryStatus();
+        using var process = Process.GetCurrentProcess();
+
+        Fill(memoryList,
+            ("Загрузка памяти", $"{ms.MemoryLoad}%"),
+            ("Всего физической памяти", Describe(ms.TotalPhys)),
+            ("Свободно физической памяти", Describe(ms.AvailPhys)),
+            ("Всего в файле подкачки", Describe(ms.TotalPageFile)),
+            ("Свободно в файле подкачки", Describe(ms.AvailPageFile)),
+            ("Всего виртуальной памяти процесса", Describe(ms.TotalVirtual)),
+            ("Свободно виртуальной памяти процесса", Describe(ms.AvailVirtual)),
+            ("", ""),
+            (".NET: Process.WorkingSet64", Describe((ulong)process.WorkingSet64)),
+            (".NET: Process.PrivateMemorySize64", Describe((ulong)process.PrivateMemorySize64)),
+            (".NET: Process.VirtualMemorySize64", Describe((ulong)process.VirtualMemorySize64)),
+            (".NET: GC.GetTotalMemory", Describe((ulong)GC.GetTotalMemory(false))),
+            ("Время замера", DateTime.Now.ToLongTimeString()));
+    }
+
+    void BuildMap()
+    {
+        using var process = Process.GetCurrentProcess();
+        modules = process.Modules
+            .Cast<ProcessModule>()
+            .Select(m => ((ulong)m.BaseAddress, (ulong)m.BaseAddress + (ulong)m.ModuleMemorySize, m.ModuleName))
+            .ToList();
+
+        regions = VirtualMemory.GetRegions().ToList();
+        ShowMap();
+    }
+
+    void ShowMap()
+    {
+        var filtered = stateFilter.SelectedItem is MemoryState state
+            ? regions.Where(r => r.State == state)
+            : regions;
+
+        mapGrid.DataSource = filtered.Select(r => new
+        {
+            Адрес = r.BaseAddress.Hex(),
+            Регион = r.IsFree ? "" : r.AllocationBase.Hex(),
+            Размер = r.Size.Bytes(),
+            Состояние = r.State,
+            Защита = r.IsFree ? "" : r.Protect.ToString(),
+            Тип = r.IsFree ? "" : r.Type.ToString(),
+            Модуль = ModuleOf(r)
+        }).ToList();
+
+        mapSummary.Text = string.Join("    ", regions
+            .GroupBy(r => r.State)
+            .Select(g => $"{g.Key}: {g.Count()} шт., {g.Aggregate(0UL, (sum, r) => sum + r.Size).Bytes()}"));
+    }
+
+    string ModuleOf(MemoryRegion region) =>
+        region.Type == MemoryType.Image
+            ? modules.FirstOrDefault(m => region.AllocationBase >= m.Start && region.AllocationBase < m.End).Name ?? ""
+            : "";
+
+    void MapGridDoubleClick(object? sender, DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0)
+            return;
+
+        addressBox.Text = mapGrid.Rows[e.RowIndex].Cells[0].Value?.ToString();
+        QueryAddress();
+    }
+
+    void QueryAddress()
+    {
+        var text = addressBox.Text.Trim().TrimStart('$').Replace("0x", "", StringComparison.OrdinalIgnoreCase);
+
+        if (!ulong.TryParse(text, NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var address))
+        {
+            MessageBox.Show("Введите адрес в шестнадцатеричном виде, например 0x7FFE0000");
+            return;
+        }
+
+        if (VirtualMemory.Query(address) is not { } r)
+        {
+            Fill(regionList, ("Результат", "VirtualQuery вернула 0"));
+            return;
+        }
+
+        Fill(regionList,
+            ("Запрошенный адрес", address.Hex()),
+            ("BaseAddress", r.BaseAddress.Hex()),
+            ("AllocationBase", r.IsFree ? "-" : r.AllocationBase.Hex()),
+            ("AllocationProtect", r.IsFree ? "-" : r.AllocationProtect.ToString()),
+            ("RegionSize", Describe(r.Size)),
+            ("State", r.State.ToString()),
+            ("Protect", r.IsFree ? "-" : r.Protect.ToString()),
+            ("Type", r.IsFree ? "-" : r.Type.ToString()),
+            ("Модуль", ModuleOf(r)));
+    }
+
+    void RunAllocDemo()
+    {
+        allocLog.Clear();
+        var si = VirtualMemory.GetSystemInfo();
+        ulong address;
+
+        using (var region = VirtualRegion.Reserve(si.AllocationGranularity))
+        {
+            address = region.Address;
+            Log($"1) Reserve: VirtualAlloc(NULL, {si.AllocationGranularity}, MEM_RESERVE, PAGE_NOACCESS)", region.Info);
+
+            region.Commit(si.PageSize);
+            Log($"2) Commit: VirtualAlloc({address.Hex()}, {si.PageSize}, MEM_COMMIT, PAGE_READWRITE)", region.Info);
+
+            region.WriteInt32(12345);
+            allocLog.AppendText($"3) Записали в память 12345, прочитали: {region.ReadInt32()}{Environment.NewLine}{Environment.NewLine}");
+
+            region.Decommit(si.PageSize);
+            Log($"4) Decommit: VirtualFree({address.Hex()}, {si.PageSize}, MEM_DECOMMIT)", region.Info);
+        }
+
+        Log($"5) Dispose: VirtualFree({address.Hex()}, 0, MEM_RELEASE)", VirtualMemory.Query(address));
+        addressBox.Text = address.Hex();
+    }
+
+    void Log(string step, MemoryRegion? region) =>
+        allocLog.AppendText($"{step}{Environment.NewLine}   {region}{Environment.NewLine}{Environment.NewLine}");
+
+    static string Describe(ulong bytes) => $"{bytes.Bytes()}  ({bytes:N0} байт)";
+
+    static void Fill(ListView list, params (string Name, string Value)[] rows)
+    {
+        list.BeginUpdate();
+        list.Items.Clear();
+        foreach (var (name, value) in rows)
+            list.Items.Add(new ListViewItem(new[] { name, value }));
+        list.EndUpdate();
+    }
+
+    static ListView CreatePairList(int nameWidth, int valueWidth)
+    {
+        var list = new ListView
+        {
+            Dock = DockStyle.Fill,
+            View = View.Details,
+            FullRowSelect = true,
+            GridLines = true,
+            Font = new Font("Segoe UI", 10)
+        };
+        list.Columns.Add("Параметр", nameWidth);
+        list.Columns.Add("Значение", valueWidth);
+        return list;
+    }
+
+    static TabPage CreateTab(string title, Control content, params Control[] toolbar)
+    {
+        var panel = new FlowLayoutPanel { Dock = DockStyle.Top, AutoSize = true, Padding = new Padding(4) };
+        panel.Controls.AddRange(toolbar);
+
+        var page = new TabPage(title);
+        page.Controls.Add(content);
+        page.Controls.Add(panel);
+        return page;
+    }
+
+    static Button CreateButton(string text, Action action)
+    {
+        var button = new Button { Text = text, AutoSize = true };
+        button.Click += (_, _) => action();
+        return button;
+    }
+
+    static Label CreateLabel(string text) =>
+        new() { Text = text, AutoSize = true, Margin = new Padding(10, 8, 0, 0) };
 }
